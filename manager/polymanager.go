@@ -71,9 +71,12 @@ func NewPolyManager(servCfg *config.ServiceConfig, startblockHeight uint32, poly
 	if err != nil {
 		return nil, err
 	}
-	ks := tools.NewEthKeyStore(servCfg.ETHConfig)
+	chainId, err := ethereumsdk.ChainID(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	ks := tools.NewEthKeyStore(servCfg.ETHConfig, chainId)
 	accArr := ks.GetAccounts()
-
 	if len(servCfg.ETHConfig.KeyStorePwdSet) == 0 {
 		fmt.Println("please input the passwords for ethereum keystore: ")
 		for _, v := range accArr {
@@ -314,13 +317,14 @@ func (this *EthSender) sendTxToEth(info *EthTxInfo) error {
 		return fmt.Errorf("commitDepositEventsWithHeader - send transaction error and return nonce %d: %v\n", nonce, err)
 	}
 	hash := signedtx.Hash()
+
 	isSuccess := this.waitTransactionConfirm(hash)
 	if isSuccess {
-		log.Infof("successful to relay tx to ethereum: (eth_hash: %s, nonce: %d, poly_hash: %s)",
-			hash.String(), nonce, info.polyTxHash)
+		log.Infof("successful to relay tx to ethereum: (eth_hash: %s, nonce: %d, poly_hash: %s, eth_explorer: %s)",
+			hash.String(), nonce, info.polyTxHash, tools.GetExplorerUrl(this.keyStore.GetChainId()) + hash.String())
 	} else {
-		log.Errorf("failed to relay tx to ethereum: (eth_hash: %s, nonce: %d, poly_hash: %s)",
-			hash.String(),nonce, info.polyTxHash)
+		log.Errorf("failed to relay tx to ethereum: (eth_hash: %s, nonce: %d, poly_hash: %s, eth_explorer: %s)",
+			hash.String(), nonce, info.polyTxHash, tools.GetExplorerUrl(this.keyStore.GetChainId()) + hash.String())
 	}
 	return nil
 }
@@ -496,11 +500,11 @@ func (this *EthSender) commitHeader(header *polytypes.Header) bool {
 	txhash := signedtx.Hash()
 	isSuccess := this.waitTransactionConfirm(txhash)
 	if isSuccess {
-		log.Infof("successful to relay poly header to ethereum: (header_hash: %s, height: %d, eth_txhash: %s, nonce: %d)",
-			hash.ToHexString(), header.Height, txhash.String(), nonce)
+		log.Infof("successful to relay poly header to ethereum: (header_hash: %s, height: %d, eth_txhash: %s, nonce: %d, eth_explorer: %s)",
+			hash.ToHexString(), header.Height, txhash.String(), nonce, tools.GetExplorerUrl(this.keyStore.GetChainId()) + txhash.String())
 	} else {
-		log.Errorf("failed to relay poly header to ethereum: (header_hash: %s, height: %d, eth_txhash: %s, nonce: %d)",
-			hash.ToHexString(), header.Height, txhash.String(), nonce)
+		log.Errorf("failed to relay poly header to ethereum: (header_hash: %s, height: %d, eth_txhash: %s, nonce: %d, eth_explorer: %s)",
+			hash.ToHexString(), header.Height, txhash.String(), nonce, tools.GetExplorerUrl(this.keyStore.GetChainId()) + txhash.String())
 	}
 	return true
 }
@@ -525,7 +529,7 @@ func (this *EthSender) waitTransactionConfirm(hash ethcommon.Hash) bool {
 		if err != nil {
 			continue
 		}
-		log.Debugf("transaction %s is pending: %b\n", hash.String(), ispending)
+		log.Debugf("transaction %s is pending: %v", hash.String(), ispending)
 		if ispending == true {
 			continue
 		} else {

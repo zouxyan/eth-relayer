@@ -218,12 +218,12 @@ func (this *EthereumManager) init() error {
 	if latestHeight == 0 {
 		return fmt.Errorf("init - the genesis block has not synced!")
 	}
-	log.Infof("init - latest synced height: %d", latestHeight)
 	if this.forceHeight > 0 && this.forceHeight < latestHeight {
 		this.currentHeight = this.forceHeight
 	} else {
 		this.currentHeight = latestHeight
 	}
+	log.Infof("EthereumManager init - start height: %d", this.currentHeight)
 	return nil
 }
 
@@ -419,7 +419,7 @@ func (this *EthereumManager) handleLockDepositEvents(refHeight uint64) error {
 	return nil
 }
 func (this *EthereumManager) commitProof(height uint32, proof []byte, value []byte, txhash []byte) (string, error) {
-	log.Infof("commit proof, height: %d, proof: %s, value: %s, txhash: %s", height, string(proof), hex.EncodeToString(value), hex.EncodeToString(txhash))
+	log.Debugf("commit proof, height: %d, proof: %s, value: %s, txhash: %s", height, string(proof), hex.EncodeToString(value), hex.EncodeToString(txhash))
 	tx, err := this.polySdk.Native.Ccm.ImportOuterTransfer(
 		uint64(config.ETH_CHAIN_ID),
 		value,
@@ -431,7 +431,8 @@ func (this *EthereumManager) commitProof(height uint32, proof []byte, value []by
 	if err != nil {
 		return "", err
 	} else {
-		log.Infof("commitProof - send transaction to poly chain: %s, height: %d", tx.ToHexString(), height)
+		log.Infof("commitProof - send transaction to poly chain: ( poly_txhash: %s, eth_txhash: %s, height: %d )",
+			tx.ToHexString(), ethcommon.BytesToHash(txhash).String(), height)
 		return tx.ToHexString(), nil
 	}
 }

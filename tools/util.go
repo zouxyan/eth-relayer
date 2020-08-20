@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ontio/ontology-crypto/ec"
 	"github.com/ontio/ontology-crypto/keypair"
 	"github.com/ontio/ontology-crypto/sm2"
@@ -273,5 +274,16 @@ func GetCurveLabel(name string) (byte, error) {
 		return 5, nil
 	default:
 		panic("err")
+	}
+}
+
+func GetExplorerUrl(chainId uint64) string {
+	switch chainId {
+	case params.MainnetChainConfig.ChainID.Uint64():
+		return "https://etherscan.io/tx/"
+	case params.RopstenChainConfig.ChainID.Uint64():
+		return "https://ropsten.etherscan.io/tx/"
+	default:
+		return "no url"
 	}
 }

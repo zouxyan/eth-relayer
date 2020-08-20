@@ -23,13 +23,15 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/polynetwork/eth_relayer/config"
 	"github.com/polynetwork/eth_relayer/log"
+	"math/big"
 )
 
 type EthKeyStore struct {
 	ks *keystore.KeyStore
+	chainId *big.Int
 }
 
-func NewEthKeyStore(sigConfig *config.ETHConfig) *EthKeyStore {
+func NewEthKeyStore(sigConfig *config.ETHConfig, chainId *big.Int) *EthKeyStore {
 	service := &EthKeyStore{}
 	capitalKeyStore := keystore.NewKeyStore(sigConfig.KeyStorePath, keystore.StandardScryptN,
 		keystore.StandardScryptP)
@@ -46,11 +48,12 @@ func NewEthKeyStore(sigConfig *config.ETHConfig) *EthKeyStore {
 	log.Infof("relayer are using accounts: [ %s ]", str)
 
 	service.ks = capitalKeyStore
+	service.chainId = chainId
 	return service
 }
 
 func (this *EthKeyStore) SignTransaction(tx *types.Transaction, acc accounts.Account, pwd string) (*types.Transaction, error) {
-	tx, err := this.ks.SignTxWithPassphrase(acc, pwd, tx, nil)
+	tx, err := this.ks.SignTxWithPassphrase(acc, pwd, tx, this.chainId)
 	if err != nil {
 		return nil, err
 	}
@@ -67,4 +70,8 @@ func (this *EthKeyStore) TestPwd(acc accounts.Account, pwd string) error {
 	}
 	_ = this.ks.Lock(acc.Address)
 	return nil
+}
+
+func (this *EthKeyStore) GetChainId() uint64 {
+	return this.chainId.Uint64()
 }
