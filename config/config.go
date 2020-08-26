@@ -55,6 +55,7 @@ type ServiceConfig struct {
 	ETHConfig  *ETHConfig
 	BoltDbPath string
 	RoutineNum int64
+	TargetContracts map[string][]string
 }
 
 type PolyConfig struct {

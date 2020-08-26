@@ -289,8 +289,23 @@ func (this *EthereumManager) fetchLockDepositEvents(height uint64, client *ethcl
 		log.Infof("fetchLockDepositEvents - no events found on FilterCrossChainEvent")
 		return false
 	}
+
 	for events.Next() {
 		evt := events.Event
+		var isTarget bool
+		contractSet, ok := this.config.TargetContracts["2"]
+		if ok {
+			toContractStr := evt.ProxyOrAssetContract.String()
+			for _, v := range contractSet {
+				if toContractStr == v {
+					isTarget = true
+					break
+				}
+			}
+			if !isTarget {
+				continue
+			}
+		}
 		index := big.NewInt(0)
 		index.SetBytes(evt.TxId)
 		crossTx := &CrossTransfer{
@@ -418,6 +433,7 @@ func (this *EthereumManager) handleLockDepositEvents(refHeight uint64) error {
 	}
 	return nil
 }
+
 func (this *EthereumManager) commitProof(height uint32, proof []byte, value []byte, txhash []byte) (string, error) {
 	log.Debugf("commit proof, height: %d, proof: %s, value: %s, txhash: %s", height, string(proof), hex.EncodeToString(value), hex.EncodeToString(txhash))
 	tx, err := this.polySdk.Native.Ccm.ImportOuterTransfer(
