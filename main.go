@@ -24,7 +24,10 @@ import (
 	"github.com/polynetwork/eth_relayer/db"
 	"github.com/polynetwork/eth_relayer/log"
 	"github.com/polynetwork/eth_relayer/manager"
+	"github.com/polynetwork/eth_relayer/rest/http/restful"
+	"github.com/polynetwork/eth_relayer/rest/service"
 	sdk "github.com/polynetwork/poly-go-sdk"
+	"github.com/polynetwork/poly/common/password"
 	"github.com/urfave/cli"
 	"os"
 	"os/signal"
@@ -116,8 +119,32 @@ func startServer(ctx *cli.Context) {
 		return
 	}
 
-	initETHServer(servConfig, polySdk, ethereumsdk, boltDB)
+	restful.FlamCli = restful.NewRestClient(servConfig.FlamingoServer)
+	if servConfig.JWTToken == "" {
+		fmt.Println("please input your secret code to get JWT token:")
+		rawSecret, err := password.GetPassword()
+		if err != nil {
+			panic(fmt.Errorf("failed to get secret: %v", err))
+		}
+		servConfig.JWTToken, err = restful.FlamCli.GetJWTToken(string(rawSecret))
+		if err != nil {
+			panic(fmt.Errorf("failed to get JWT token: %v", err))
+		}
+		if err := servConfig.Save(ConfigPath); err != nil {
+			panic(fmt.Errorf("failed to save the config file: %v", err))
+		}
+		fmt.Println("success!")
+	}
+	restful.FlamCli.Jwt = servConfig.JWTToken
+
+	server := restful.InitRestServer(service.NewService(), servConfig.LocalServerPort, servConfig.FlamingoServer)
+	go func() {
+		if err := server.Start(); err != nil {
+			panic(err)
+		}
+	}()
 	initPolyServer(servConfig, polySdk, ethereumsdk, boltDB)
+	initETHServer(servConfig, polySdk, ethereumsdk, boltDB)
 	waitToExit()
 }
 

@@ -8,3 +8,4 @@ config-debug.json
 log/20*
 UTC--*
 *_test.go
+config-flam-debug.json

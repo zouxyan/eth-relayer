@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -26,6 +27,9 @@ import (
 	"github.com/polynetwork/eth-contracts/go_abi/eccm_abi"
 	"github.com/polynetwork/eth_relayer/config"
 	"github.com/polynetwork/eth_relayer/db"
+	"github.com/polynetwork/eth_relayer/rest/http/restful"
+	"github.com/polynetwork/eth_relayer/rest/utils"
+	common2 "github.com/polynetwork/poly/native/service/cross_chain_manager/common"
 	"math/big"
 	"strings"
 	"time"
@@ -41,7 +45,34 @@ import (
 	autils "github.com/polynetwork/poly/native/service/utils"
 )
 
+type TxArgs struct {
+	toAssetHash []byte
+	toAddr      []byte
+	amt         *big.Int
+}
+
+func (args *TxArgs) Deserialization(source *common.ZeroCopySource) error {
+	var (
+		eof bool
+	)
+	args.toAssetHash, eof = source.NextVarBytes()
+	if eof {
+		return fmt.Errorf("Waiting deserialize toAssetHash error")
+	}
+	args.toAddr, eof = source.NextVarBytes()
+	if eof {
+		return fmt.Errorf("Waiting deserialize toAddr error")
+	}
+	raw, eof := source.NextBytes(32)
+	if eof {
+		return fmt.Errorf("Waiting deserialize raw amount error")
+	}
+	args.amt = utils.BigIntFromNeoBytes(raw)
+	return nil
+}
+
 type CrossTransfer struct {
+	sender  ethcommon.Address
 	txIndex string
 	txId    []byte
 	value   []byte
@@ -50,6 +81,7 @@ type CrossTransfer struct {
 }
 
 func (this *CrossTransfer) Serialization(sink *common.ZeroCopySink) {
+	sink.WriteVarBytes(this.sender.Bytes())
 	sink.WriteString(this.txIndex)
 	sink.WriteVarBytes(this.txId)
 	sink.WriteVarBytes(this.value)
@@ -58,6 +90,10 @@ func (this *CrossTransfer) Serialization(sink *common.ZeroCopySink) {
 }
 
 func (this *CrossTransfer) Deserialization(source *common.ZeroCopySource) error {
+	rawSender, eof := source.NextVarBytes()
+	if eof {
+		return fmt.Errorf("Waiting deserialize rawSender error")
+	}
 	txIndex, eof := source.NextString()
 	if eof {
 		return fmt.Errorf("Waiting deserialize txIndex error")
@@ -78,6 +114,7 @@ func (this *CrossTransfer) Deserialization(source *common.ZeroCopySource) error 
 	if eof {
 		return fmt.Errorf("Waiting deserialize height error")
 	}
+	this.sender = ethcommon.BytesToAddress(rawSender)
 	this.txIndex = txIndex
 	this.txId = txId
 	this.value = value
@@ -99,6 +136,8 @@ type EthereumManager struct {
 	header4sync    [][]byte
 	crosstx4sync   []*CrossTransfer
 	db             *db.BoltDB
+	eccm           *eccm_abi.EthCrossChainManager
+	proxy          ethcommon.Address
 }
 
 func NewEthereumManager(servconfig *config.ServiceConfig, startheight uint64, startforceheight uint64, ontsdk *sdk.PolySdk, client *ethclient.Client, boltDB *db.BoltDB) (*EthereumManager, error) {
@@ -130,7 +169,10 @@ func NewEthereumManager(servconfig *config.ServiceConfig, startheight uint64, st
 		}
 	}
 	log.Infof("NewETHManager - poly address: %s", signer.Address.ToBase58())
-
+	eccm, err := eccm_abi.NewEthCrossChainManager(ethcommon.HexToAddress(servconfig.ETHConfig.ECCMContractAddress), client)
+	if err != nil {
+		return nil, err
+	}
 	mgr := &EthereumManager{
 		config:        servconfig,
 		exitChan:      make(chan int),
@@ -143,6 +185,8 @@ func NewEthereumManager(servconfig *config.ServiceConfig, startheight uint64, st
 		header4sync:   make([][]byte, 0),
 		crosstx4sync:  make([]*CrossTransfer, 0),
 		db:            boltDB,
+		eccm:          eccm,
+		proxy:         ethcommon.HexToAddress(servconfig.ETHConfig.LockProxyAddress),
 	}
 	err = mgr.init()
 	if err != nil {
@@ -170,12 +214,16 @@ func (this *EthereumManager) MonitorChain() {
 			log.Infof("MonitorChain - eth height is %d", height)
 			blockHandleResult = true
 			for this.currentHeight < height-config.ETH_USEFUL_BLOCK_NUM {
-				blockHandleResult = this.handleNewBlock(this.currentHeight + 1)
-				if blockHandleResult == false {
+				if !this.handleNewBlock(this.currentHeight + 1) {
 					break
 				}
-				this.currentHeight++
+				if err := this.ScanUnLockEvents(this.currentHeight); err != nil {
+					// TODO retry
+					log.Errorf("MonitorChain - failed to scan unlock events: %v", err)
+				}
 				// try to commit header if more than 50 headers needed to be syned
+				// try to commit lastest header when we are at latest height
+				this.currentHeight++
 				if len(this.header4sync) >= 50 {
 					if this.commitHeader() != 0 {
 						log.Errorf("MonitorChain - commit header failed.")
@@ -188,7 +236,6 @@ func (this *EthereumManager) MonitorChain() {
 			if blockHandleResult == false {
 				continue
 			}
-			// try to commit lastest header when we are at latest height
 			commitHeaderResult := this.commitHeader()
 			if commitHeaderResult > 0 {
 				log.Errorf("MonitorChain - commit header failed.")
@@ -270,8 +317,8 @@ func (this *EthereumManager) handleBlockHeader(height uint64) bool {
 }
 
 func (this *EthereumManager) fetchLockDepositEvents(height uint64, client *ethclient.Client) bool {
-	lockAddress := ethcommon.HexToAddress(this.config.ETHConfig.ECCMContractAddress)
-	lockContract, err := eccm_abi.NewEthCrossChainManager(lockAddress, client)
+	eccmAddr := ethcommon.HexToAddress(this.config.ETHConfig.ECCMContractAddress)
+	lockContract, err := eccm_abi.NewEthCrossChainManager(eccmAddr, client)
 	if err != nil {
 		return false
 	}
@@ -302,13 +349,14 @@ func (this *EthereumManager) fetchLockDepositEvents(height uint64, client *ethcl
 					break
 				}
 			}
-			if !isTarget {
-				continue
-			}
+		}
+		if !isTarget {
+			continue
 		}
 		index := big.NewInt(0)
 		index.SetBytes(evt.TxId)
 		crossTx := &CrossTransfer{
+			sender:  evt.Sender,
 			txIndex: tools.EncodeBigInt(index),
 			txId:    evt.Raw.TxHash.Bytes(),
 			toChain: uint32(evt.ToChainId),
@@ -364,10 +412,10 @@ func (this *EthereumManager) MonitorDeposit() {
 				log.Infof("MonitorChain - cannot get node height, err: %s", err)
 				continue
 			}
-			snycheight := this.findLastestHeight()
-			if snycheight > height-config.ETH_PROOF_USERFUL_BLOCK {
+			syncheight := this.findLastestHeight()
+			if syncheight > height-config.ETH_PROOF_USERFUL_BLOCK {
 				// try to handle deposit event when we are at latest height
-				this.handleLockDepositEvents(snycheight)
+				this.handleLockDepositEvents(syncheight)
 			}
 		case <-this.exitChan:
 			return
@@ -407,20 +455,56 @@ func (this *EthereumManager) handleLockDepositEvents(refHeight uint64) error {
 			continue
 		}
 		//3. commit proof to poly
-		txHash, err := this.commitProof(uint32(height), proof, crosstx.value, crosstx.txId)
-		if err != nil {
-			if strings.Contains(err.Error(), "chooseUtxos, current utxo is not enough") {
+		p := &common2.MakeTxParam{}
+		if err := p.Deserialization(common.NewZeroCopySource(crosstx.value)); err != nil {
+			log.Errorf("handleLockDepositEvents - failed to deserialize makeTxParam: %v", err)
+			continue
+		}
+		args := &TxArgs{}
+		if err = args.Deserialization(common.NewZeroCopySource(p.Args)); err != nil {
+			log.Errorf("handleLockDepositEvents - failed to deserialize tx args: %v", err)
+			continue
+		}
+
+		ethTx := ethcommon.BytesToHash(crosstx.txId).String()
+		txHash, terr := this.commitProof(uint32(height), proof, crosstx.value, crosstx.txId)
+		if terr != nil {
+			if strings.Contains(terr.Error(), "chooseUtxos, current utxo is not enough") {
 				log.Infof("handleLockDepositEvents - invokeNativeContract error: %s", err)
 				continue
 			} else {
 				if err := this.db.DeleteRetry(v); err != nil {
 					log.Errorf("handleLockDepositEvents - this.db.DeleteRetry error: %s", err)
 				}
-				log.Errorf("handleLockDepositEvents - invokeNativeContract error: %s", err)
+				log.Errorf("handleLockDepositEvents - invokeNativeContract for ethTx %s error: %v", ethTx, terr)
+				timeStart := time.Now()
+			RETRY1:
+				if err := restful.FlamCli.SendTxPair(
+					2,
+					crosstx.toChain,
+					crosstx.sender.String(),
+					hex.EncodeToString(args.toAddr),
+					common.UINT256_EMPTY.ToHexString(),
+					ethTx,
+					ethcommon.BytesToAddress(p.FromContractAddress).String(),
+					args.amt.Uint64(),
+					-1); err != nil {
+					if time.Now().Sub(timeStart) > this.config.RetryTimeout*time.Hour {
+						log.Errorf("handleLockDepositEvents - failed to send tx "+
+							"(eth_tx: %s, poly_tx: %s, status: FAILED) to flamingo: %v", ethTx, txHash, err)
+						continue
+					}
+					log.Debugf("handleLockDepositEvents - failed to send tx "+
+						"(eth_tx: %s, poly_tx: %s, status: FAILED) to flamingo: %s",
+						ethTx, txHash, strings.Split(err.Error(), ",")[0])
+					time.Sleep(time.Second * this.config.RetryDuration)
+					goto RETRY1
+				}
+				log.Infof("handleLockDepositEvents - success to send tx pair (eth_tx: %s, status: FAILED, error: %v)",
+					ethTx, err)
 				continue
 			}
 		}
-		//4. put to check db for checking
 		err = this.db.PutCheck(txHash, v)
 		if err != nil {
 			log.Errorf("handleLockDepositEvents - this.db.PutCheck error: %s", err)
@@ -429,7 +513,32 @@ func (this *EthereumManager) handleLockDepositEvents(refHeight uint64) error {
 		if err != nil {
 			log.Errorf("handleLockDepositEvents - this.db.PutCheck error: %s", err)
 		}
-		log.Infof("handleLockDepositEvents - syncProofToAlia txHash is %s", txHash)
+		log.Infof("handleLockDepositEvents - syncProofToAlia (eth_tx: %s, poly_tx: %s, status: PENDING)", ethTx, txHash)
+		//4. put to check db for checking
+		timeStart := time.Now()
+	RETRY2:
+		if err := restful.FlamCli.SendTxPair(
+			2,
+			crosstx.toChain,
+			crosstx.sender.String(),
+			hex.EncodeToString(args.toAddr),
+			txHash,
+			ethTx,
+			ethcommon.BytesToAddress(p.FromContractAddress).String(),
+			args.amt.Uint64(),
+			1); err != nil {
+			if time.Now().Sub(timeStart) > this.config.RetryTimeout*time.Hour {
+				log.Errorf("handleLockDepositEvents - failed to send tx "+
+					"(eth_tx: %s, poly_tx: %s, status: PENDING) to flamingo: %v", ethTx, txHash, err)
+				continue
+			}
+			log.Debugf("handleLockDepositEvents - failed to send tx "+
+				"(eth_tx: %s, poly_tx: %s, status: PENDING) to flamingo: %s",
+				ethTx, txHash, strings.Split(err.Error(), ",")[0])
+			time.Sleep(time.Second * this.config.RetryDuration)
+			goto RETRY2
+		}
+		log.Infof("handleLockDepositEvents - success to send tx pending (eth_tx: %s, poly_tx: %s, status: PENDING) to flamingo", ethTx, txHash)
 	}
 	return nil
 }
@@ -466,7 +575,9 @@ func (this *EthereumManager) CheckDeposit() {
 		select {
 		case <-checkTicker.C:
 			// try to check deposit
-			this.checkLockDepositEvents()
+			if err := this.checkLockDepositEvents(); err != nil {
+				log.Errorf("CheckDeposit - %v", err)
+			}
 		case <-this.exitChan:
 			return
 		}
@@ -487,17 +598,83 @@ func (this *EthereumManager) checkLockDepositEvents() error {
 			log.Infof("checkLockDepositEvents - can not find event of hash %s", k)
 			continue
 		}
+		polyStatus := 0
 		if event.State != 1 {
 			log.Infof("checkLockDepositEvents - state of tx %s is not success", k)
 			err := this.db.PutRetry(v)
 			if err != nil {
 				log.Errorf("checkLockDepositEvents - this.db.PutRetry error:%s", err)
 			}
+			polyStatus = -1
 		} else {
-			err := this.db.DeleteCheck(k)
-			if err != nil {
+			if err := this.db.DeleteCheck(k); err != nil {
 				log.Errorf("checkLockDepositEvents - this.db.DeleteRetry error:%s", err)
 			}
+		}
+		crosstx := new(CrossTransfer)
+		if err := crosstx.Deserialization(common.NewZeroCopySource(v)); err != nil {
+			panic(fmt.Errorf("checkLockDepositEvents - retry.Deserialization error: %s", err))
+		}
+		p := &common2.MakeTxParam{}
+		if err := p.Deserialization(common.NewZeroCopySource(crosstx.value)); err != nil {
+			log.Errorf("checkLockDepositEvents - failed to deserialize makeTxParam: %v", err)
+			continue
+		}
+		args := &TxArgs{}
+		if err = args.Deserialization(common.NewZeroCopySource(p.Args)); err != nil {
+			log.Errorf("checkLockDepositEvents - failed to deserialize tx args: %v", err)
+			continue
+		}
+		ethTxHash := ethcommon.BytesToHash(crosstx.txId).String()
+		timeStart := time.Now()
+	RETRY:
+		if err := restful.FlamCli.UpdateTxPair(
+			2,
+			crosstx.toChain,
+			crosstx.sender.String(),
+			hex.EncodeToString(args.toAddr),
+			k,
+			ethTxHash,
+			ethcommon.BytesToAddress(p.FromContractAddress).String(),
+			args.amt.Uint64(),
+			polyStatus); err != nil {
+			if time.Now().Sub(timeStart) > this.config.RetryTimeout*time.Hour {
+				log.Errorf("checkLockDepositEvents - failed to send tx pair ( poly_txhash: %s, eth_txhash: %s, status: %d ): %v",
+					k, ethTxHash, polyStatus, err)
+				continue
+			}
+			log.Debugf("checkLockDepositEvents - failed to send tx pair ( poly_txhash: %s, eth_txhash: %s, status: %d ): %s",
+				k, ethTxHash, polyStatus, strings.Split(err.Error(), ",")[0])
+			time.Sleep(time.Second * this.config.RetryDuration)
+			goto RETRY
+		}
+		log.Infof("checkLockDepositEvents - success to send tx pair (poly_tx: %s, eth_tx: %s, status: %d)", k, ethTxHash, polyStatus)
+	}
+	return nil
+}
+
+func (this *EthereumManager) ScanUnLockEvents(height uint64) error {
+	events, err := this.eccm.FilterVerifyHeaderAndExecuteTxEvent(&bind.FilterOpts{
+		Start:   height,
+		End:     &height,
+		Context: context.Background(),
+	})
+	if err != nil {
+		return err
+	}
+	res := make([]string, 0)
+	for events.Next() {
+		toContract := ethcommon.BytesToAddress(events.Event.ToContract)
+		if !bytes.Equal(this.proxy.Bytes(), toContract.Bytes()) {
+			continue
+		}
+		res = append(res, hex.EncodeToString(events.Event.FromChainTxHash))
+	}
+
+	if len(res) > 0 {
+		err = restful.FlamCli.SendConfirmedTxArr(res)
+		if err != nil {
+			return err
 		}
 	}
 	return nil

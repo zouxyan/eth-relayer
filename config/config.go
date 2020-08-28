@@ -42,6 +42,10 @@ const (
 	DEFAULT_LOG_LEVEL = log.InfoLog
 )
 
+var (
+	RelayerStatus = 0
+)
+
 //type ETH struct {
 //	Chain             string // eth or etc
 //	ChainId           uint64
@@ -51,11 +55,15 @@ const (
 //}
 
 type ServiceConfig struct {
-	PolyConfig *PolyConfig
-	ETHConfig  *ETHConfig
-	BoltDbPath string
-	RoutineNum int64
+	PolyConfig      *PolyConfig
+	ETHConfig       *ETHConfig
+	BoltDbPath      string
 	TargetContracts map[string][]string
+	FlamingoServer  string
+	LocalServerPort uint64
+	JWTToken        string
+	RetryDuration   time.Duration
+	RetryTimeout    time.Duration
 }
 
 type PolyConfig struct {
@@ -69,6 +77,7 @@ type ETHConfig struct {
 	RestURL             string
 	ECCMContractAddress string
 	ECCDContractAddress string
+	LockProxyAddress    string
 	KeyStorePath        string
 	KeyStorePwdSet      map[string]string
 	BlockConfig         uint64
@@ -115,4 +124,15 @@ func NewServiceConfig(configFilePath string) *ServiceConfig {
 	}
 
 	return servConfig
+}
+
+func (this *ServiceConfig) Save(fileName string) error {
+	data, err := json.MarshalIndent(this, "", "\t")
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(fileName, data, 0644); err != nil {
+		return fmt.Errorf("failed to write conf file: %v", err)
+	}
+	return nil
 }

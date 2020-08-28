@@ -27,7 +27,7 @@ import (
 )
 
 type EthKeyStore struct {
-	ks *keystore.KeyStore
+	ks      *keystore.KeyStore
 	chainId *big.Int
 }
 
